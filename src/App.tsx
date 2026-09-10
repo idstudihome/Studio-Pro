@@ -14,14 +14,26 @@ import { AppWorkspaceView } from './components/views/AppWorkspaceView';
 import { KelasView } from './components/views/KelasView';
 import { ShopView } from './components/views/ShopView';
 import { SettingsView } from './components/views/SettingsView';
+import { AdminDashboardView } from './components/views/AdminDashboardView';
 
-import { MainView, User, AccountProfile, MicrotoolAction } from './types';
+import { MainView, User, AccountProfile, MicrotoolAction, ToolConfig } from './types';
 import { STORAGE_KEYS, supabase, isSupabaseConfigured } from './lib/supabase';
 
 export default function App() {
   // Navigation & Tool State
   const [activeView, setActiveView] = useState<MainView>('app');
   const [activeToolId, setActiveToolId] = useState<string>('Flow');
+
+  // Workspace Tools Config State (Customizable via Admin Dashboard)
+  const [tools, setTools] = useState<Record<string, ToolConfig>>(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEYS.ADMIN_TOOLS);
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return TOOLS_CONFIG;
+  });
 
   // Sidebar & Studio Drawers
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -121,12 +133,62 @@ export default function App() {
     }
   }, []);
 
-  const handleAddAccount = (newAcc: AccountProfile) => {
+  // Sync tools and accounts from backend REST API
+  useEffect(() => {
+    fetch('/api/tools')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data && typeof data === 'object' && Object.keys(data).length > 0) {
+          setTools(data);
+          localStorage.setItem(STORAGE_KEYS.ADMIN_TOOLS, JSON.stringify(data));
+        }
+      })
+      .catch(() => {});
+
+    fetch('/api/accounts')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: AccountProfile[]) => {
+        if (Array.isArray(data) && data.length > 0) {
+          setAccounts(data);
+          const active = data.find((a) => a.active);
+          if (active) setActiveAccountId(active.id);
+          localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(data));
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const handleAddAccount = async (newAcc: AccountProfile) => {
     const updated = [newAcc, ...accounts];
     setAccounts(updated);
     setActiveAccountId(newAcc.id);
     localStorage.setItem(STORAGE_KEYS.ACCOUNTS, JSON.stringify(updated));
     showToast(`Akun ${newAcc.name} berhasil dihubungkan!`, 'success');
+
+    try {
+      await fetch('/api/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newAcc),
+      });
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleSwitchAccount = async (accId: string) => {
+    setActiveAccountId(accId);
+    setAccounts((prev) => prev.map((a) => ({ ...a, active: a.id === accId })));
+    showToast('Akun sesi aktif diganti.', 'info');
+    try {
+      await fetch('/api/accounts/switch-active', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: accId }),
+      });
+    } catch {
+      // ignore
+    }
   };
 
   const handleLoginSuccess = (user: User) => {
@@ -150,7 +212,14 @@ export default function App() {
     showToast('Berhasil keluar dari akun.', 'info');
   };
 
-  const activeToolConfig = TOOLS_CONFIG[activeToolId] || TOOLS_CONFIG.Flow;
+  const [workspaceRefreshKey, setWorkspaceRefreshKey] = useState(0);
+
+  const handleForceRefresh = () => {
+    setWorkspaceRefreshKey((prev) => prev + 1);
+    showToast('Menyegarkan website asli...', 'info');
+  };
+
+  const activeToolConfig = tools[activeToolId] || tools.Flow || TOOLS_CONFIG.Flow;
   const activeAccountObj = accounts.find((a) => a.id === activeAccountId) || accounts[0];
 
   return (
@@ -168,6 +237,8 @@ export default function App() {
         }}
         currentUser={currentUser}
         onOpenAuth={() => setIsAuthOpen(true)}
+        onForceRefresh={handleForceRefresh}
+        activeToolName={activeToolConfig.name}
       />
 
       {/* Main Workspace Frame */}
@@ -185,11 +256,9 @@ export default function App() {
           }}
           accounts={accounts}
           activeAccountId={activeAccountId}
-          onSelectAccount={(accId) => {
-            setActiveAccountId(accId);
-            showToast('Akun sesi aktif diganti.', 'info');
-          }}
+          onSelectAccount={(accId) => handleSwitchAccount(accId)}
           onOpenAddAccount={() => setIsAddAccountOpen(true)}
+          toolsConfig={tools}
         />
 
         {/* Center View Canvas */}
@@ -198,6 +267,9 @@ export default function App() {
             <AppWorkspaceView
               tool={activeToolConfig}
               activeAccount={activeAccountObj}
+              userEmail={currentUser?.email}
+              refreshKey={workspaceRefreshKey}
+              onForceRefresh={handleForceRefresh}
               onOpenAddAccount={() => setIsAddAccountOpen(true)}
               onOpenStudio={() => setIsStudioOpen(true)}
               onOpenVideoPlayer={() => setIsVideoPlayerOpen(true)}
@@ -214,6 +286,22 @@ export default function App() {
               currentUser={currentUser}
               onOpenAuth={() => setIsAuthOpen(true)}
               onShowToast={showToast}
+              onSelectView={(view) => setActiveView(view)}
+            />
+          )}
+
+          {activeView === 'admin' && (
+            <AdminDashboardView
+              currentUser={currentUser}
+              tools={tools}
+              onUpdateTools={(newTools) => setTools(newTools)}
+              accounts={accounts}
+              onUpdateAccounts={(newAccs) => setAccounts(newAccs)}
+              onShowToast={showToast}
+              onSwitchToWorkspace={(toolId) => {
+                if (toolId) setActiveToolId(toolId);
+                setActiveView('app');
+              }}
             />
           )}
         </main>

@@ -26,6 +26,7 @@ interface SidebarProps {
   activeAccountId: string;
   onSelectAccount: (accountId: string) => void;
   onOpenAddAccount: () => void;
+  toolsConfig?: Record<string, ToolConfig>;
 }
 
 export const TOOLS_CONFIG: Record<string, ToolConfig> = {
@@ -43,10 +44,10 @@ export const TOOLS_CONFIG: Record<string, ToolConfig> = {
     id: 'Gemini',
     name: 'Gemini Advanced',
     category: 'assistant',
-    url: 'https://gemini.google.com/advanced',
+    url: 'https://gemini.google.com',
     template: 'generic',
     title: 'Gemini Advanced Workspace',
-    desc: 'Model penalaran multimodal terkini dengan integrasi Gemini 3.8 Flash di Studio Pro.',
+    desc: 'Model penalaran multimodal terkini dengan integrasi Gemini di Studio Pro.',
     color: 'purple',
   },
   Grok: {
@@ -103,7 +104,7 @@ export const TOOLS_CONFIG: Record<string, ToolConfig> = {
     id: 'TikTok',
     name: 'TikTok Creator',
     category: 'social',
-    url: 'https://www.tiktok.com/creator-center',
+    url: 'https://www.tiktok.com',
     template: 'generic',
     title: 'TikTok Creator Center',
     desc: 'Publikasi video pendek, analisis penonton, dan tren musik FYP.',
@@ -143,10 +144,10 @@ export const TOOLS_CONFIG: Record<string, ToolConfig> = {
     id: 'RisetProduk',
     name: 'Riset Produk',
     category: 'riset',
-    url: 'https://workspace.local/riset-produk',
+    url: 'https://ads.tiktok.com/business/creativecenter/inspiration/popular/pc/en',
     template: 'generic',
-    title: 'Riset Produk & E-Commerce',
-    desc: 'Temukan produk laris, peluang margin tinggi, dan volume pesanan pasar.',
+    title: 'Riset Produk & Tren Viral',
+    desc: 'Temukan produk laris, peluang tren FYP, dan hashtag viral real-time.',
     color: 'emerald',
   },
   GoogleTrends: {
@@ -170,7 +171,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeAccountId,
   onSelectAccount,
   onOpenAddAccount,
+  toolsConfig,
 }) => {
+  const currentTools = toolsConfig || TOOLS_CONFIG;
+  const builtInKeys = new Set([
+    'Flow', 'Gemini', 'Grok', 'ChatGPT', 'Canva', 'CapCut', 'GoogleNotes',
+    'TikTok', 'YouTube', 'Instagram', 'X', 'RisetProduk', 'GoogleTrends'
+  ]);
+  const customTools = Object.values(currentTools).filter((t) => !builtInKeys.has(t.id));
   return (
     <>
       {/* Mobile Backdrop Overlay */}
@@ -375,6 +383,35 @@ export const Sidebar: React.FC<SidebarProps> = ({
               </button>
             </div>
           </div>
+
+          {/* Section 5: Platform Kustom dari Admin (Jika ada) */}
+          {customTools.length > 0 && (
+            <div>
+              <h3 className="px-2 text-[10px] font-bold text-zinc-400 uppercase tracking-widest mb-2">
+                Platform Kustom Admin
+              </h3>
+              <div className="space-y-1">
+                {customTools.map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => onSelectTool(item.id)}
+                    className={`w-full flex items-center justify-between p-2 rounded-xl text-left transition ${
+                      activeToolId === item.id
+                        ? 'bg-white shadow-sm border border-zinc-200 text-zinc-900 font-bold'
+                        : 'hover:bg-white/80 border border-transparent text-zinc-600 font-medium'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-7 h-7 rounded-lg bg-purple-100 text-purple-700 font-black text-[10px] flex items-center justify-center uppercase">
+                        {item.name.slice(0, 2)}
+                      </div>
+                      <span className="text-xs truncate">{item.name}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
         </div>
 

@@ -15,8 +15,12 @@ Selamat datang di **Studio Pro**! Dokumen ini dirancang khusus untuk memberikan 
    - **10 Microtools AI Terpadu**: TikTok Downloader, Split Video AI, Voiceover Generator, Foto Produk AI, Branding AI, Mockup Produk, Fotografer AI, Affiliate Kit Hook Viral, Prompt Video Sinematik, dan Character Sheet Consistency.
 3. **Integrasi Gemini Otomatis dengan Akun Gmail**:
    - Ketika masuk dengan akun pengguna (misalnya `idstudihome@gmail.com`), sistem secara otomatis menghubungkan akses API Gemini dari backend tanpa meminta API key manual, sekaligus mendukung custom key jika pengguna memiliki kuota Google AI Studio pribadi.
-4. **Multi-Workspace & Akun Sesi**:
-   - Manajemen multi-akun Google Flow (dengan pelacak kredit), Grok xAI, ChatGPT Plus, Canva Pro, CapCut Editor, Google Keep/Notes, TikTok Creator, YouTube Studio, dan Riset Produk.
+4. **Multi-Workspace Real & Solusi Inovatif Web Langsung**:
+   - **Mode 1 - Workspace Interaktif (Utama & Praktis)**: Berjalan 100% langsung di panel aplikasi tanpa hambatan proteksi iframe `X-Frame-Options`. Setiap platform (Google Flow, Canva Pro, CapCut, Gemini, Grok, ChatGPT, Keep, Trends, Riset Produk) dilengkapi logika produktivitas riil (termasuk download PNG Canva resolusi tinggi & timeline CapCut).
+   - **Mode 2 - Web Langsung (Smart Proxy Relay)**: Membuka website langsung di dalam panel workspace menggunakan endpoint server-side proxy `/api/proxy-web` yang menonaktifkan header pembatas `X-Frame-Options` & `CSP frame-ancestors`, dilengkapi bilah navigasi browser interaktif (Back, Forward, Reload, input URL custom, dan tombol Akses).
+   - **Mode 3 - Layar Bersanding (Dual Split View)**: Inovasi mutakhir yang membagi workspace menjadi dua panel berdampingan: Panel Kiri berisi kontrol generator prompt AI Studio Pro, dan Panel Kanan menampilkan canvas Web Langsung.
+   - **Kompanyon Layar Terpadu (Picture-in-Picture)**: Jendela pop-out mengambang sinkron yang dapat dibuka berdampingan di layar komputer dengan tombol salin prompt 1-klik untuk platform dengan proteksi login akun Google/Cloudflare ketat.
+   - **Ekosistem Google Otomatis Masuk**: Platform Google Flow, Gemini, Keep, dan Trends terhubung otomatis dengan akun Google pengguna.
 5. **Dukungan Offline**: Cache service worker terintegrasi otomatis menampilkan indikator status ketika sinyal terputus.
 
 ---

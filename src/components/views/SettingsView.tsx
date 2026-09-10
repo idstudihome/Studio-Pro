@@ -8,8 +8,9 @@ import {
   Trash2,
   CheckCircle2,
   ExternalLink,
+  Sliders,
 } from 'lucide-react';
-import { User } from '../../types';
+import { User, MainView } from '../../types';
 import { isSupabaseConfigured, STORAGE_KEYS } from '../../lib/supabase';
 import { checkGeminiServerStatus } from '../../services/gemini';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
@@ -18,17 +19,19 @@ interface SettingsViewProps {
   currentUser: User;
   onOpenAuth: () => void;
   onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
+  onSelectView?: (view: MainView) => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   currentUser,
   onOpenAuth,
   onShowToast,
+  onSelectView,
 }) => {
   const { isInstallable, isInstalled, install } = usePWAInstall();
   const [geminiStatus, setGeminiStatus] = useState<{ available: boolean; model: string }>({
     available: true,
-    model: 'gemini-3.8-flash',
+    model: 'gemini-flash-latest',
   });
 
   useEffect(() => {
@@ -54,6 +57,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           Konfigurasi PWA, integrasi Supabase, Vercel, dan manajemen akun Google AI Studio.
         </p>
       </div>
+
+      {/* Admin Dashboard Entry Card */}
+      {onSelectView && (
+        <div className="bg-gradient-to-r from-zinc-900 via-purple-950 to-zinc-900 text-white border border-purple-800/60 rounded-3xl p-6 shadow-md flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div className="flex items-center gap-3.5">
+            <div className="w-12 h-12 rounded-2xl bg-purple-600/30 border border-purple-500/40 flex items-center justify-center text-purple-300 flex-shrink-0">
+              <Sliders className="w-6 h-6" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h3 className="text-base font-extrabold text-white">Dashboard Admin Studio Pro</h3>
+                <span className="px-2 py-0.5 rounded-full text-[10px] font-black bg-purple-800/80 text-purple-200 border border-purple-600">
+                  ADMIN AKTIF
+                </span>
+              </div>
+              <p className="text-xs text-zinc-300 mt-1">
+                Kelola URL platform, akun PRO bersama, katalog produk digital, kurikulum kelas, dan log audit sistem.
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={() => onSelectView('admin')}
+            className="px-4 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-extrabold transition shadow-md shadow-purple-600/30 flex items-center justify-center gap-2 flex-shrink-0 active:scale-95"
+          >
+            <span>Buka Dashboard Admin</span>
+            <ExternalLink className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
 
       {/* Card 1: PWA Status & Installation */}
       <div className="bg-white border border-zinc-200/80 rounded-3xl p-6 shadow-sm space-y-4">
