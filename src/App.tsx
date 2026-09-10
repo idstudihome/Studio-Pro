@@ -267,6 +267,7 @@ export default function App() {
             <AppWorkspaceView
               tool={activeToolConfig}
               activeAccount={activeAccountObj}
+              activeAccountId={activeAccountId}
               userEmail={currentUser?.email}
               refreshKey={workspaceRefreshKey}
               onForceRefresh={handleForceRefresh}
