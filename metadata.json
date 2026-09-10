@@ -1,0 +1,8 @@
+{
+  "name": "Studio Pro",
+  "description": "Studio Pro - AI Workspace Manager & Platform Multifungsi dengan integrasi Gemini API cerdas, Storyboard Maker, Microtools, Multi-Akun, dan PWA siap deploy.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
