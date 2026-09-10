@@ -77,10 +77,17 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
   const [loadAttempt, setLoadAttempt] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const popupWindowRef = useRef<Window | null>(null);
+  const loadTimeoutRef = useRef<number | null>(null);
+  const loadTimedOutRef = useRef(false);
 
   const hostname = targetUrl?.hostname || 'target eksternal tidak valid';
 
   const resetLoadState = () => {
+    if (loadTimeoutRef.current !== null) {
+      window.clearTimeout(loadTimeoutRef.current);
+      loadTimeoutRef.current = null;
+    }
+    loadTimedOutRef.current = false;
     setHasLoadError(false);
     setIsLoading(Boolean(targetUrl));
     setViewMode(standalonePreferred ? 'window' : 'embed');
@@ -95,12 +102,18 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
 
     if (!targetUrl || standalonePreferred) return;
 
-    const timeoutId = window.setTimeout(() => {
+    loadTimeoutRef.current = window.setTimeout(() => {
+      loadTimedOutRef.current = true;
       setIsLoading(false);
       setHasLoadError(true);
     }, IFRAME_LOAD_TIMEOUT_MS);
 
-    return () => window.clearTimeout(timeoutId);
+    return () => {
+      if (loadTimeoutRef.current !== null) {
+        window.clearTimeout(loadTimeoutRef.current);
+        loadTimeoutRef.current = null;
+      }
+    };
   }, [
     tool.id,
     tool.url,
@@ -110,8 +123,6 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
     standalonePreferred,
   ]);
 
-  // Close the tracked popup reference when the component is unmounted only if
-  // it has already been closed by the user. Never force-close a user's window.
   useEffect(() => {
     return () => {
       popupWindowRef.current = null;
@@ -157,21 +168,35 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
 
   const handleTriggerRefresh = () => {
     setIsRefreshing(true);
-    setHasLoadError(false);
-    setIsLoading(Boolean(targetUrl) && !standalonePreferred);
+    resetLoadState();
     setLoadAttempt((value) => value + 1);
     onForceRefresh?.();
     window.setTimeout(() => setIsRefreshing(false), 800);
   };
 
   const handleIframeLoad = () => {
+    if (loadTimedOutRef.current) return;
+
+    if (loadTimeoutRef.current !== null) {
+      window.clearTimeout(loadTimeoutRef.current);
+      loadTimeoutRef.current = null;
+    }
     setIsLoading(false);
     setHasLoadError(false);
   };
 
   const handleIframeError = () => {
+    if (loadTimeoutRef.current !== null) {
+      window.clearTimeout(loadTimeoutRef.current);
+      loadTimeoutRef.current = null;
+    }
     setIsLoading(false);
     setHasLoadError(true);
+  };
+
+  const handleRetry = () => {
+    resetLoadState();
+    setLoadAttempt((value) => value + 1);
   };
 
   return (
@@ -292,10 +317,7 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
                 </button>
                 {!standalonePreferred && (
                   <button
-                    onClick={() => {
-                      resetLoadState();
-                      setViewMode('embed');
-                    }}
+                    onClick={() => setViewMode('embed')}
                     className="py-2.5 px-4 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white rounded-xl text-xs font-bold transition border border-zinc-700"
                   >
                     Coba Frame
@@ -335,11 +357,7 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
                       Buka di Jendela Mandiri
                     </button>
                     <button
-                      onClick={() => {
-                        setHasLoadError(false);
-                        setIsLoading(true);
-                        setLoadAttempt((value) => value + 1);
-                      }}
+                      onClick={handleRetry}
                       className="px-4 py-2.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 rounded-xl text-xs font-bold transition"
                     >
                       Coba Lagi
