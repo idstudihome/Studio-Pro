@@ -2,21 +2,30 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ExternalLink,
-  Globe,
   Maximize2,
   RotateCw,
   ShieldCheck,
-  Sparkles,
 } from 'lucide-react';
 import { AccountProfile, ToolConfig } from '../../types';
 
 const IFRAME_LOAD_TIMEOUT_MS = 6000;
 
-// These providers are known to be poor candidates for iframe embedding because
-// authentication/CSP/X-Frame-Options can prevent a useful embedded session.
-// Keep this list explicit and conservative; it is not a substitute for the
-// browser's actual framing policy.
-const STANDALONE_PREFERRED_HOSTS = new Set(['labs.google']);
+/**
+ * Full web apps frequently reject iframe embedding through CSP/X-Frame-Options
+ * or require browser-level authentication/cookie behavior. These hosts should
+ * therefore start in the native browser window so users get the real product,
+ * not a simulated Studio Pro surface.
+ */
+const STANDALONE_HOST_PATTERNS = [
+  /^([a-z0-9-]+\.)*chatgpt\.com$/i,
+  /^([a-z0-9-]+\.)*canva\.com$/i,
+  /^([a-z0-9-]+\.)*capcut\.com$/i,
+  /^([a-z0-9-]+\.)*tiktok\.com$/i,
+  /^([a-z0-9-]+\.)*instagram\.com$/i,
+  /^([a-z0-9-]+\.)*x\.com$/i,
+  /^([a-z0-9-]+\.)*labs\.google$/i,
+  /^([a-z0-9-]+\.)*google\.com$/i,
+];
 
 interface AppWorkspaceViewProps {
   tool: ToolConfig;
@@ -31,16 +40,13 @@ interface AppWorkspaceViewProps {
   onShowToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
-function validateExternalTarget(rawUrl: string | undefined): URL | null {
+function validateExternalTarget(rawUrl?: string): URL | null {
   if (!rawUrl || typeof window === 'undefined') return null;
 
   try {
     const url = new URL(rawUrl.trim());
 
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-
-    // An iframe must never point back to Studio Pro itself. This prevents a
-    // recursive iframe loop when a missing/bad target falls back to the app URL.
     if (url.origin === window.location.origin) return null;
     if (url.href === window.location.href) return null;
 
@@ -51,8 +57,15 @@ function validateExternalTarget(rawUrl: string | undefined): URL | null {
 }
 
 function shouldPreferStandalone(url: URL | null): boolean {
-  if (!url) return false;
-  return STANDALONE_PREFERRED_HOSTS.has(url.hostname);
+  return Boolean(url && STANDALONE_HOST_PATTERNS.some((pattern) => pattern.test(url.hostname)));
+}
+
+function buildPopupFeatures(): string {
+  const width = Math.min(1440, Math.max(980, Math.round(window.screen.availWidth * 0.86)));
+  const height = Math.min(960, Math.max(720, Math.round(window.screen.availHeight * 0.86)));
+  const left = Math.max(0, Math.round((window.screen.availWidth - width) / 2));
+  const top = Math.max(0, Math.round((window.screen.availHeight - height) / 2));
+  return `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,location=yes,toolbar=yes,menubar=no,status=yes`;
 }
 
 export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
@@ -63,303 +76,247 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
   onShowToast,
 }) => {
   const targetUrl = useMemo(() => validateExternalTarget(tool.url), [tool.url]);
-  const standalonePreferred = useMemo(
-    () => shouldPreferStandalone(targetUrl),
-    [targetUrl],
-  );
+  const standalonePreferred = useMemo(() => shouldPreferStandalone(targetUrl), [targetUrl]);
 
-  const [isLoading, setIsLoading] = useState(Boolean(targetUrl));
-  const [hasLoadError, setHasLoadError] = useState(false);
-  const [viewMode, setViewMode] = useState<'embed' | 'window'>(
-    standalonePreferred ? 'window' : 'embed',
-  );
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [mode, setMode] = useState<'embed' | 'standalone'>(standalonePreferred ? 'standalone' : 'embed');
+  const [isLoading, setIsLoading] = useState(Boolean(targetUrl) && !standalonePreferred);
+  const [loadError, setLoadError] = useState(false);
+  const [iframeKey, setIframeKey] = useState(0);
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const popupWindowRef = useRef<Window | null>(null);
-  const loadTimeoutRef = useRef<number | null>(null);
-  const loadTimedOutRef = useRef(false);
+  const timeoutRef = useRef<number | null>(null);
+  const timedOutRef = useRef(false);
 
-  const hostname = targetUrl?.hostname || 'target eksternal tidak valid';
+  const hostname = targetUrl?.hostname || 'URL tidak valid';
 
-  const resetLoadState = () => {
-    if (loadTimeoutRef.current !== null) {
-      window.clearTimeout(loadTimeoutRef.current);
-      loadTimeoutRef.current = null;
+  const clearLoadTimer = () => {
+    if (timeoutRef.current !== null) {
+      window.clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
     }
-    loadTimedOutRef.current = false;
-    setHasLoadError(false);
-    setIsLoading(Boolean(targetUrl));
-    setViewMode(standalonePreferred ? 'window' : 'embed');
   };
 
-  // Reset iframe lifecycle whenever the selected platform, account session, or
-  // explicit refresh changes. Main-menu navigation unmounts this component;
-  // account changes are included explicitly so stale loading state cannot leak.
+  const resetWorkspaceState = () => {
+    clearLoadTimer();
+    timedOutRef.current = false;
+    setLoadError(false);
+    setMode(standalonePreferred ? 'standalone' : 'embed');
+    setIsLoading(Boolean(targetUrl) && !standalonePreferred);
+    setIframeKey((value) => value + 1);
+  };
+
   useEffect(() => {
-    resetLoadState();
-    setLoadAttempt(0);
+    clearLoadTimer();
+    timedOutRef.current = false;
+    setLoadError(false);
+    setMode(standalonePreferred ? 'standalone' : 'embed');
+    setIsLoading(Boolean(targetUrl) && !standalonePreferred);
+    setIframeKey((value) => value + 1);
 
-    if (!targetUrl || standalonePreferred) return;
+    return clearLoadTimer;
+    // Changing account is intentionally part of the lifecycle reset: account
+    // sessions must never inherit stale iframe state from another account.
+  }, [tool.id, tool.url, activeAccountId, refreshKey, standalonePreferred, targetUrl]);
 
-    loadTimeoutRef.current = window.setTimeout(() => {
-      loadTimedOutRef.current = true;
+  useEffect(() => clearLoadTimer, []);
+
+  useEffect(() => {
+    if (!targetUrl || standalonePreferred || mode !== 'embed') return;
+
+    timeoutRef.current = window.setTimeout(() => {
+      timedOutRef.current = true;
       setIsLoading(false);
-      setHasLoadError(true);
+      setLoadError(true);
     }, IFRAME_LOAD_TIMEOUT_MS);
 
-    return () => {
-      if (loadTimeoutRef.current !== null) {
-        window.clearTimeout(loadTimeoutRef.current);
-        loadTimeoutRef.current = null;
-      }
-    };
-  }, [
-    tool.id,
-    tool.url,
-    activeAccountId,
-    refreshKey,
-    targetUrl,
-    standalonePreferred,
-  ]);
+    return clearLoadTimer;
+  }, [iframeKey, mode, standalonePreferred, targetUrl]);
 
-  useEffect(() => {
-    return () => {
-      popupWindowRef.current = null;
-    };
-  }, []);
-
-  const handleOpenStandaloneWindow = () => {
+  const openStandalone = () => {
     if (!targetUrl) {
-      onShowToast?.('URL platform tidak valid, jadi jendela mandiri tidak dapat dibuka.', 'error');
+      onShowToast?.('Platform tidak memiliki URL eksternal yang valid.', 'error');
       return;
     }
 
-    const width = 1320;
-    const height = 860;
-    const left = Math.max(0, (window.screen.width - width) / 2);
-    const top = Math.max(0, (window.screen.height - height) / 2);
+    const popup = window.open(targetUrl.href, `StudioPro_${tool.id}`, buildPopupFeatures());
 
-    const win = window.open(
-      targetUrl.href,
-      `StudioPro_${tool.id}`,
-      `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=yes,status=no,resizable=yes,scrollbars=yes`,
-    );
-
-    if (win) {
-      popupWindowRef.current = win;
-      win.focus();
-      onShowToast?.(`Membuka ${tool.name} di jendela mandiri.`, 'success');
-    } else {
+    if (!popup) {
       window.open(targetUrl.href, '_blank', 'noopener,noreferrer');
-      onShowToast?.('Pop-up diblokir browser. Target dibuka di tab baru.', 'info');
-    }
-  };
-
-  const handleOpenNewTab = () => {
-    if (!targetUrl) {
-      onShowToast?.('URL platform tidak valid.', 'error');
+      onShowToast?.('Jendela baru diblokir browser. Platform dibuka di tab baru.', 'info');
       return;
     }
 
-    window.open(targetUrl.href, '_blank', 'noopener,noreferrer');
-    onShowToast?.(`Membuka ${tool.name} di tab browser.`, 'info');
+    popup.opener = null;
+    popup.focus();
+    setMode('standalone');
+    setIsLoading(false);
+    onShowToast?.(`${tool.name} dibuka menggunakan web resmi platform.`, 'success');
   };
 
-  const handleTriggerRefresh = () => {
-    setIsRefreshing(true);
-    resetLoadState();
-    setLoadAttempt((value) => value + 1);
+  const handleEmbedLoad = () => {
+    if (timedOutRef.current) return;
+    clearLoadTimer();
+    setIsLoading(false);
+    setLoadError(false);
+  };
+
+  const handleEmbedError = () => {
+    clearLoadTimer();
+    setIsLoading(false);
+    setLoadError(true);
+  };
+
+  const retryEmbed = () => {
+    clearLoadTimer();
+    timedOutRef.current = false;
+    setLoadError(false);
+    setIsLoading(true);
+    setIframeKey((value) => value + 1);
+  };
+
+  const refresh = () => {
+    resetWorkspaceState();
     onForceRefresh?.();
-    window.setTimeout(() => setIsRefreshing(false), 800);
   };
 
-  const handleIframeLoad = () => {
-    if (loadTimedOutRef.current) return;
-
-    if (loadTimeoutRef.current !== null) {
-      window.clearTimeout(loadTimeoutRef.current);
-      loadTimeoutRef.current = null;
-    }
-    setIsLoading(false);
-    setHasLoadError(false);
-  };
-
-  const handleIframeError = () => {
-    if (loadTimeoutRef.current !== null) {
-      window.clearTimeout(loadTimeoutRef.current);
-      loadTimeoutRef.current = null;
-    }
-    setIsLoading(false);
-    setHasLoadError(true);
-  };
-
-  const handleRetry = () => {
-    resetLoadState();
-    setLoadAttempt((value) => value + 1);
-  };
+  if (!targetUrl) {
+    return (
+      <div className="w-full h-full flex items-center justify-center bg-zinc-50 p-6">
+        <div className="max-w-md rounded-2xl border border-zinc-200 bg-white p-7 text-center shadow-sm">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-zinc-100 text-zinc-500">
+            <AlertTriangle className="h-6 w-6" />
+          </div>
+          <h2 className="text-sm font-extrabold text-zinc-900">URL platform tidak valid</h2>
+          <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+            Workspace hanya dapat memuat alamat web eksternal yang valid. Tidak ada iframe atau halaman pengganti yang dibuat oleh Studio Pro.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="w-full h-full flex flex-col overflow-hidden bg-zinc-950 select-text">
-      <div className="h-10 bg-zinc-900 border-b border-zinc-800 px-3 flex items-center justify-between flex-shrink-0 z-30 select-none text-zinc-300 text-xs">
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-800 rounded-lg border border-zinc-700 font-mono text-[11px] text-zinc-300">
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
-            <span className="font-semibold text-white tracking-tight truncate max-w-[200px] sm:max-w-[320px]">
-              {hostname}
-            </span>
+    <div className="flex h-full w-full flex-col overflow-hidden bg-white">
+      <header className="flex h-11 flex-shrink-0 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <ShieldCheck className="h-4 w-4 flex-shrink-0 text-emerald-600" />
+          <div className="min-w-0">
+            <div className="truncate text-xs font-extrabold text-zinc-900">{tool.name}</div>
+            <div className="truncate text-[10px] font-mono text-zinc-500">{hostname}</div>
           </div>
-
-          {standalonePreferred && targetUrl && (
-            <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-amber-300 px-2 py-0.5 bg-amber-950 border border-amber-800 rounded-md">
-              <Sparkles className="w-3 h-3" />
-              <span>Jendela Mandiri Disarankan</span>
-            </div>
+          {standalonePreferred && (
+            <span className="hidden rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-bold text-amber-700 sm:inline-flex">
+              Web native disarankan
+            </span>
           )}
         </div>
 
-        <div className="hidden md:flex items-center gap-1 p-0.5 bg-zinc-950 rounded-lg border border-zinc-800">
+        <div className="flex flex-shrink-0 items-center gap-1">
+          {!standalonePreferred && (
+            <button
+              type="button"
+              onClick={() => {
+                setMode('embed');
+                setLoadError(false);
+                setIsLoading(true);
+                setIframeKey((value) => value + 1);
+              }}
+              className={`hidden rounded-lg px-2.5 py-1.5 text-[10px] font-bold md:block ${mode === 'embed' ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:bg-zinc-100'}`}
+            >
+              Workspace Web
+            </button>
+          )}
           <button
-            onClick={() => targetUrl && setViewMode('embed')}
-            disabled={!targetUrl || standalonePreferred}
-            className={`px-3 py-1 rounded-md text-[11px] font-bold transition disabled:cursor-not-allowed disabled:opacity-40 ${
-              viewMode === 'embed'
-                ? 'bg-zinc-800 text-white shadow-xs'
-                : 'text-zinc-400 hover:text-zinc-200'
+            type="button"
+            onClick={openStandalone}
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold transition ${
+              mode === 'standalone' || standalonePreferred
+                ? 'bg-purple-600 text-white hover:bg-purple-500'
+                : 'border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
             }`}
+            title="Buka web resmi platform"
           >
-            Tampilan Frame
+            <Maximize2 className="h-3 w-3" />
+            <span className="hidden sm:inline">Web Resmi</span>
           </button>
           <button
-            onClick={() => {
-              if (!targetUrl) return;
-              setViewMode('window');
-              handleOpenStandaloneWindow();
-            }}
-            disabled={!targetUrl}
-            className={`px-3 py-1 rounded-md text-[11px] font-bold transition disabled:cursor-not-allowed disabled:opacity-40 ${
-              viewMode === 'window'
-                ? 'bg-purple-600 text-white shadow-xs'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
+            type="button"
+            onClick={refresh}
+            className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900"
+            title="Muat ulang web platform"
           >
-            Jendela Mandiri
+            <RotateCw className="h-3.5 w-3.5" />
           </button>
+          <a
+            href={targetUrl.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900"
+            title="Buka platform di tab baru"
+            aria-label={`Buka ${tool.name} di tab baru`}
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
         </div>
+      </header>
 
-        <div className="flex items-center gap-1.5">
-          <button
-            onClick={handleTriggerRefresh}
-            disabled={!targetUrl}
-            className={`p-1.5 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100 rounded-lg transition active:scale-95 border border-transparent hover:border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed ${
-              isRefreshing ? 'animate-spin text-purple-400' : ''
-            }`}
-            title="Segarkan sesi platform"
-          >
-            <RotateCw className="w-3.5 h-3.5" />
-          </button>
-
-          <button
-            onClick={handleOpenStandaloneWindow}
-            disabled={!targetUrl}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border transition active:scale-95 font-medium text-[11px] disabled:opacity-40 disabled:cursor-not-allowed ${
-              standalonePreferred
-                ? 'bg-purple-600 hover:bg-purple-500 text-white border-purple-500 shadow-sm'
-                : 'bg-purple-600/20 hover:bg-purple-600 text-purple-300 hover:text-white border-purple-500/30'
-            }`}
-            title="Buka platform langsung di jendela mandiri"
-          >
-            <Maximize2 className="w-3 h-3" />
-            <span className="hidden sm:inline">Jendela Mandiri</span>
-          </button>
-
-          <button
-            onClick={handleOpenNewTab}
-            disabled={!targetUrl}
-            className="p-1.5 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100 rounded-lg transition active:scale-95 border border-transparent hover:border-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
-            title="Buka di tab browser baru"
-          >
-            <ExternalLink className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </div>
-
-      <div className="w-full flex-1 relative overflow-hidden bg-white">
-        {!targetUrl ? (
-          <div className="w-full h-full flex items-center justify-center p-6 bg-zinc-50 text-center">
-            <div className="max-w-md rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm">
-              <div className="mx-auto mb-4 w-12 h-12 rounded-xl bg-zinc-100 flex items-center justify-center text-zinc-500">
-                <AlertTriangle className="w-6 h-6" />
+      <main className="relative min-h-0 flex-1 overflow-hidden bg-white">
+        {mode === 'standalone' ? (
+          <div className="flex h-full w-full items-center justify-center bg-zinc-50 p-6 text-center">
+            <div className="max-w-lg rounded-2xl border border-zinc-200 bg-white p-7 shadow-sm">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-purple-50 text-purple-600">
+                <Maximize2 className="h-6 w-6" />
               </div>
-              <h3 className="text-sm font-extrabold text-zinc-900">Platform belum memiliki URL yang valid</h3>
+              <h2 className="text-sm font-extrabold text-zinc-900">Gunakan web resmi {tool.name}</h2>
               <p className="mt-2 text-xs leading-relaxed text-zinc-500">
-                Studio Pro tidak memuat iframe karena target kosong, URL tidak valid, atau URL mengarah kembali ke aplikasi ini. Periksa konfigurasi platform sebelum mencoba lagi.
+                Browser memerlukan konteks web asli untuk login, cookie, keamanan, dan navigasi platform. Studio Pro tidak mengganti halaman platform dengan simulasi.
               </p>
-            </div>
-          </div>
-        ) : viewMode === 'window' ? (
-          <div className="w-full h-full bg-zinc-950 flex flex-col items-center justify-center p-6 text-center text-zinc-300">
-            <div className="max-w-md bg-zinc-900 border border-zinc-800 p-6 rounded-2xl shadow-xl flex flex-col items-center">
-              <div className="w-14 h-14 rounded-2xl bg-purple-700 flex items-center justify-center text-white mb-4">
-                <Globe className="w-7 h-7" />
-              </div>
-              <h3 className="text-base font-extrabold text-white mb-1">{tool.name} menggunakan Jendela Mandiri</h3>
-              <p className="text-xs text-zinc-400 mb-6 leading-relaxed">
-                Platform ini dapat membatasi iframe melalui CSP/X-Frame-Options atau alur login pihak ketiga. Jendela mandiri adalah jalur yang direkomendasikan agar sesi dan navigasi berjalan secara native.
-              </p>
-              <div className="flex flex-col sm:flex-row gap-2.5 w-full">
-                <button
-                  onClick={handleOpenStandaloneWindow}
-                  className="flex-1 py-2.5 px-4 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2"
-                >
-                  <Maximize2 className="w-3.5 h-3.5" />
-                  <span>Buka Jendela Mandiri</span>
-                </button>
-                {!standalonePreferred && (
-                  <button
-                    onClick={() => setViewMode('embed')}
-                    className="py-2.5 px-4 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white rounded-xl text-xs font-bold transition border border-zinc-700"
-                  >
-                    Coba Frame
-                  </button>
-                )}
-              </div>
+              <button
+                type="button"
+                onClick={openStandalone}
+                className="mt-5 inline-flex items-center justify-center gap-2 rounded-xl bg-purple-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-purple-500"
+              >
+                <Maximize2 className="h-3.5 w-3.5" />
+                Buka Web Resmi
+              </button>
             </div>
           </div>
         ) : (
           <>
             {isLoading && (
-              <div className="absolute inset-0 bg-white flex flex-col items-center justify-center gap-3 z-10 text-zinc-600">
-                <RotateCw className="w-6 h-6 animate-spin text-purple-600" />
-                <div className="text-center">
-                  <span className="text-xs font-bold text-zinc-800">Menghubungkan ke {tool.name}...</span>
-                  <p className="text-[11px] text-zinc-400 mt-0.5">Menunggu respons dari {hostname} (maks. 6 detik)</p>
+              <div className="absolute inset-0 z-10 flex items-center justify-center bg-white">
+                <div className="flex flex-col items-center gap-2 text-center">
+                  <RotateCw className="h-6 w-6 animate-spin text-purple-600" />
+                  <div className="text-xs font-bold text-zinc-800">Memuat web {tool.name}…</div>
+                  <div className="text-[11px] text-zinc-400">Menunggu halaman resmi (maks. 6 detik)</div>
                 </div>
               </div>
             )}
 
-            {hasLoadError && (
-              <div className="absolute inset-0 z-20 bg-white flex items-center justify-center p-6 text-center">
+            {loadError && (
+              <div className="absolute inset-0 z-20 flex items-center justify-center bg-white p-6 text-center">
                 <div className="max-w-lg">
-                  <div className="mx-auto mb-4 w-12 h-12 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-600">
-                    <AlertTriangle className="w-6 h-6" />
+                  <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-amber-200 bg-amber-50 text-amber-600">
+                    <AlertTriangle className="h-6 w-6" />
                   </div>
-                  <h3 className="text-sm font-extrabold text-zinc-900">Browser menolak penyematan platform</h3>
+                  <h2 className="text-sm font-extrabold text-zinc-900">Web resmi tidak dapat disematkan</h2>
                   <p className="mt-2 text-xs leading-relaxed text-zinc-500">
-                    {tool.name} tidak memberikan halaman yang dapat disematkan di iframe. Ini biasanya terjadi karena kebijakan CSP/X-Frame-Options atau batasan autentikasi pihak ketiga. Studio Pro menghentikan loading agar tidak terjadi loop atau spinner tanpa akhir.
+                    {tool.name} kemungkinan menggunakan CSP/X-Frame-Options atau mekanisme login yang membutuhkan top-level browser context. Studio Pro menghentikan iframe dan tidak mencoba bypass keamanan platform.
                   </p>
-                  <div className="mt-5 flex flex-col sm:flex-row justify-center gap-2.5">
+                  <div className="mt-5 flex flex-col justify-center gap-2 sm:flex-row">
                     <button
-                      onClick={handleOpenStandaloneWindow}
-                      className="px-4 py-2.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2"
+                      type="button"
+                      onClick={openStandalone}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-purple-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-purple-500"
                     >
-                      <Maximize2 className="w-3.5 h-3.5" />
-                      Buka di Jendela Mandiri
+                      <Maximize2 className="h-3.5 w-3.5" />
+                      Buka Web Resmi
                     </button>
                     <button
-                      onClick={handleRetry}
-                      className="px-4 py-2.5 bg-zinc-100 hover:bg-zinc-200 text-zinc-700 rounded-xl text-xs font-bold transition"
+                      type="button"
+                      onClick={retryEmbed}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-xs font-bold text-zinc-700 hover:bg-zinc-50"
                     >
+                      <RotateCw className="h-3.5 w-3.5" />
                       Coba Lagi
                     </button>
                   </div>
@@ -369,20 +326,18 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
 
             <iframe
               ref={iframeRef}
-              key={`${tool.id}-${activeAccountId || 'default'}-${refreshKey}-${loadAttempt}`}
+              key={iframeKey}
               src={targetUrl.href}
-              title={tool.name}
-              onLoad={handleIframeLoad}
-              onError={handleIframeError}
-              className={`w-full h-full border-none bg-white block ${
-                isLoading || hasLoadError ? 'invisible' : 'visible'
-              }`}
-              allow="camera; microphone; clipboard-read; clipboard-write; encrypted-media; display-capture; fullscreen; geolocation; autoplay; accelerometer; gyroscope"
+              title={`${tool.name} — web resmi`}
+              onLoad={handleEmbedLoad}
+              onError={handleEmbedError}
               referrerPolicy="strict-origin-when-cross-origin"
+              allow="camera; microphone; clipboard-read; clipboard-write; encrypted-media; display-capture; fullscreen; geolocation; autoplay; accelerometer; gyroscope"
+              className="block h-full w-full border-0 bg-white"
             />
           </>
         )}
-      </div>
+      </main>
     </div>
   );
 };
