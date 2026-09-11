@@ -4,7 +4,18 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="manifest" href="/manifest.json" />
+    <script>
+      // Vercel Authentication can redirect protected *.vercel.app asset requests
+      // to vercel.com. A manifest request is CORS-sensitive, so that redirect is
+      // surfaced as a noisy browser error. Production/custom domains keep PWA
+      // support; protected Vercel preview URLs do not advertise a manifest.
+      if (!window.location.hostname.endsWith('.vercel.app')) {
+        const manifest = document.createElement('link');
+        manifest.rel = 'manifest';
+        manifest.href = '/manifest.json';
+        document.head.appendChild(manifest);
+      }
+    </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#7c3aed" />
     <meta name="mobile-web-app-capable" content="yes" />

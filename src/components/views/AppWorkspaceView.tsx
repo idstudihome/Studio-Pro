@@ -1,19 +1,30 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  RotateCw,
+  AlertTriangle,
   ExternalLink,
   Maximize2,
+  RotateCw,
   ShieldCheck,
-  Globe,
-  Sparkles,
-  Info,
-  CheckCircle2,
 } from 'lucide-react';
 import { AccountProfile, ToolConfig } from '../../types';
+
+const IFRAME_LOAD_TIMEOUT_MS = 6000;
+
+const STANDALONE_HOST_PATTERNS = [
+  /^([a-z0-9-]+\.)*chatgpt\.com$/i,
+  /^([a-z0-9-]+\.)*canva\.com$/i,
+  /^([a-z0-9-]+\.)*capcut\.com$/i,
+  /^([a-z0-9-]+\.)*tiktok\.com$/i,
+  /^([a-z0-9-]+\.)*instagram\.com$/i,
+  /^([a-z0-9-]+\.)*x\.com$/i,
+  /^([a-z0-9-]+\.)*labs\.google$/i,
+  /^([a-z0-9-]+\.)*google\.com$/i,
+];
 
 interface AppWorkspaceViewProps {
   tool: ToolConfig;
   activeAccount?: AccountProfile;
+  activeAccountId?: string;
   userEmail?: string;
   refreshKey?: number;
   onForceRefresh?: () => void;
@@ -23,252 +34,303 @@ interface AppWorkspaceViewProps {
   onShowToast?: (message: string, type?: 'success' | 'error' | 'info') => void;
 }
 
+function validateExternalTarget(rawUrl?: string): URL | null {
+  if (!rawUrl || typeof window === 'undefined') return null;
+
+  try {
+    const url = new URL(rawUrl.trim());
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    if (url.origin === window.location.origin) return null;
+    if (url.href === window.location.href) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function shouldPreferStandalone(url: URL | null): boolean {
+  return Boolean(url && STANDALONE_HOST_PATTERNS.some((pattern) => pattern.test(url.hostname)));
+}
+
+function popupFeatures(): string {
+  const width = Math.min(1440, Math.max(980, Math.round(window.screen.availWidth * 0.86)));
+  const height = Math.min(960, Math.max(720, Math.round(window.screen.availHeight * 0.86)));
+  const left = Math.max(0, Math.round((window.screen.availWidth - width) / 2));
+  const top = Math.max(0, Math.round((window.screen.availHeight - height) / 2));
+  return `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes,location=yes,toolbar=yes,menubar=no,status=yes`;
+}
+
 export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
   tool,
+  activeAccountId,
   refreshKey = 0,
   onForceRefresh,
   onShowToast,
 }) => {
-  const [isLoading, setIsLoading] = useState(true);
-  const [hasTimedOut, setHasTimedOut] = useState(false);
-  const [cacheBuster, setCacheBuster] = useState(() => Date.now());
-  const [viewMode, setViewMode] = useState<'embed' | 'window'>('embed');
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
-  const popupWindowRef = useRef<Window | null>(null);
+  const targetUrl = useMemo(() => validateExternalTarget(tool.url), [tool.url]);
+  const standalonePreferred = useMemo(() => shouldPreferStandalone(targetUrl), [targetUrl]);
 
-  // Parse hostname for the SSL badge
-  let hostname = 'web-platform';
-  try {
-    hostname = new URL(tool.url).hostname;
-  } catch {
-    hostname = tool.url;
-  }
+  const [mode, setMode] = useState<'embed' | 'standalone'>(standalonePreferred ? 'standalone' : 'embed');
+  const [isLoading, setIsLoading] = useState(Boolean(targetUrl) && !standalonePreferred);
+  const [loadError, setLoadError] = useState(false);
+  const [iframeKey, setIframeKey] = useState(0);
+  const timeoutRef = useRef<number | null>(null);
+  const timedOutRef = useRef(false);
 
-  // Handle opening in a dedicated, distraction-free app window
-  const handleOpenStandaloneWindow = () => {
-    const width = 1320;
-    const height = 860;
-    const left = Math.max(0, (window.screen.width - width) / 2);
-    const top = Math.max(0, (window.screen.height - height) / 2);
+  const hostname = targetUrl?.hostname || 'URL tidak valid';
 
-    const win = window.open(
-      tool.url,
-      `StudioPro_${tool.id}`,
-      `width=${width},height=${height},left=${left},top=${top},menubar=no,toolbar=no,location=no,status=no,resizable=yes,scrollbars=yes`
-    );
-
-    if (win) {
-      popupWindowRef.current = win;
-      win.focus();
-      onShowToast?.(`Membuka ${tool.name} di jendela aplikasi mandiri.`, 'success');
-    } else {
-      window.open(tool.url, '_blank');
-      onShowToast?.(`Pop-up diblokir peramban. Membuka di tab baru.`, 'info');
+  const clearLoadTimer = () => {
+    if (timeoutRef.current !== null) {
+      window.clearTimeout(timeoutRef.current);
+      timeoutRef.current = null;
     }
   };
 
-  // Open directly in standard new browser tab
-  const handleOpenNewTab = () => {
-    window.open(tool.url, '_blank');
-    onShowToast?.(`Membuka ${tool.name} di tab baru.`, 'info');
+  const resetWorkspaceState = () => {
+    clearLoadTimer();
+    timedOutRef.current = false;
+    setLoadError(false);
+    setMode(standalonePreferred ? 'standalone' : 'embed');
+    setIsLoading(Boolean(targetUrl) && !standalonePreferred);
+    setIframeKey((value) => value + 1);
   };
 
-  // Trigger Force Refresh
-  const handleTriggerRefresh = () => {
-    setIsRefreshing(true);
-    setIsLoading(true);
-    setHasTimedOut(false);
-    setCacheBuster(Date.now());
-    onForceRefresh?.();
-    setTimeout(() => setIsRefreshing(false), 800);
-  };
-
-  // Reset states on tool or refreshKey change
   useEffect(() => {
+    clearLoadTimer();
+    timedOutRef.current = false;
+    setLoadError(false);
+    setMode(standalonePreferred ? 'standalone' : 'embed');
+    setIsLoading(Boolean(targetUrl) && !standalonePreferred);
+    setIframeKey((value) => value + 1);
+
+    return clearLoadTimer;
+  }, [tool.id, tool.url, activeAccountId, refreshKey, standalonePreferred, targetUrl]);
+
+  useEffect(() => clearLoadTimer, []);
+
+  useEffect(() => {
+    if (!targetUrl || standalonePreferred || mode !== 'embed' || loadError) return;
+
+    timeoutRef.current = window.setTimeout(() => {
+      timedOutRef.current = true;
+      setIsLoading(false);
+      setLoadError(true);
+    }, IFRAME_LOAD_TIMEOUT_MS);
+
+    return clearLoadTimer;
+  }, [iframeKey, mode, standalonePreferred, targetUrl, loadError]);
+
+  const openStandalone = () => {
+    if (!targetUrl) {
+      onShowToast?.('Platform tidak memiliki URL eksternal yang valid.', 'error');
+      return;
+    }
+
+    const popup = window.open(targetUrl.href, `StudioPro_${tool.id}`, popupFeatures());
+
+    if (!popup) {
+      window.open(targetUrl.href, '_blank', 'noopener,noreferrer');
+      onShowToast?.('Jendela baru diblokir browser. Platform dibuka di tab baru.', 'info');
+      return;
+    }
+
+    popup.opener = null;
+    popup.focus();
+    setMode('standalone');
+    setIsLoading(false);
+    onShowToast?.(`${tool.name} dibuka menggunakan web resmi platform.`, 'success');
+  };
+
+  const handleIframeLoad = () => {
+    if (timedOutRef.current) return;
+    clearLoadTimer();
+    setIsLoading(false);
+    setLoadError(false);
+  };
+
+  const handleIframeError = () => {
+    clearLoadTimer();
+    setIsLoading(false);
+    setLoadError(true);
+  };
+
+  const retryEmbed = () => {
+    clearLoadTimer();
+    timedOutRef.current = false;
+    setLoadError(false);
     setIsLoading(true);
-    setHasTimedOut(false);
-    setCacheBuster(Date.now());
+    setMode('embed');
+    setIframeKey((value) => value + 1);
+  };
 
-    // 10s timeout detector for platforms with strict anti-framing or Cloudflare challenge
-    const timer = setTimeout(() => {
-      setHasTimedOut(true);
-    }, 10000);
+  const refresh = () => {
+    resetWorkspaceState();
+    onForceRefresh?.();
+  };
 
-    return () => clearTimeout(timer);
-  }, [tool.id, tool.url, refreshKey]);
-
-  // High-performance reverse proxy that strips X-Frame-Options and restrictive CSP headers
-  const targetSrc = `/api/proxy-web?url=${encodeURIComponent(tool.url)}&_ts=${cacheBuster}&forceRefresh=${refreshKey > 0}`;
+  if (!targetUrl) {
+    return (
+      <div className="w-full h-full flex items-center justify-center bg-zinc-50 p-6">
+        <div className="max-w-md rounded-2xl border border-zinc-200 bg-white p-7 text-center shadow-sm">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-zinc-100 text-zinc-500">
+            <AlertTriangle className="h-6 w-6" />
+          </div>
+          <h2 className="text-sm font-extrabold text-zinc-900">URL platform tidak valid</h2>
+          <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+            Workspace hanya dapat memuat alamat web eksternal yang valid. Tidak ada iframe atau halaman pengganti yang dibuat oleh Studio Pro.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="w-full h-full flex flex-col overflow-hidden bg-zinc-950 select-text">
-      {/* Sleek Companion Toolbar (Industry Best Practice) */}
-      <div className="h-10 bg-zinc-900 border-b border-zinc-800 px-3 flex items-center justify-between flex-shrink-0 z-30 select-none text-zinc-300 text-xs">
-        {/* Left: SSL Badge & Domain */}
-        <div className="flex items-center gap-2 min-w-0">
-          <div className="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-800/90 rounded-lg border border-zinc-700/60 font-mono text-[11px] text-zinc-300">
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
-            <span className="font-semibold text-white tracking-tight truncate max-w-[200px] sm:max-w-[320px]">
-              {hostname}
+    <div className="flex h-full w-full flex-col overflow-hidden bg-white">
+      <header className="flex h-11 flex-shrink-0 items-center justify-between gap-3 border-b border-zinc-200 bg-white px-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <ShieldCheck className="h-4 w-4 flex-shrink-0 text-emerald-600" />
+          <div className="min-w-0">
+            <div className="truncate text-xs font-extrabold text-zinc-900">{tool.name}</div>
+            <div className="truncate text-[10px] font-mono text-zinc-500">{hostname}</div>
+          </div>
+          {standalonePreferred && (
+            <span className="hidden rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-bold text-amber-700 sm:inline-flex">
+              Web native disarankan
             </span>
-          </div>
-
-          <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-emerald-400/90 px-2 py-0.5 bg-emerald-950/40 border border-emerald-800/40 rounded-md">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Web Resmi Aktif</span>
-          </div>
+          )}
         </div>
 
-        {/* Center: View Mode Toggle */}
-        <div className="hidden md:flex items-center gap-1 p-0.5 bg-zinc-950 rounded-lg border border-zinc-800">
-          <button
-            onClick={() => setViewMode('embed')}
-            className={`px-3 py-1 rounded-md text-[11px] font-bold transition ${
-              viewMode === 'embed'
-                ? 'bg-zinc-800 text-white shadow-xs'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            Tampilan Frame
-          </button>
-          <button
-            onClick={() => {
-              setViewMode('window');
-              handleOpenStandaloneWindow();
-            }}
-            className={`px-3 py-1 rounded-md text-[11px] font-bold transition ${
-              viewMode === 'window'
-                ? 'bg-purple-600 text-white shadow-xs'
-                : 'text-zinc-400 hover:text-zinc-200'
-            }`}
-          >
-            Jendela Mandiri (Bebas Hambatan)
-          </button>
-        </div>
-
-        {/* Right: Quick Action Controls */}
-        <div className="flex items-center gap-1.5">
-          {/* Force Refresh */}
-          <button
-            onClick={handleTriggerRefresh}
-            className={`p-1.5 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100 rounded-lg transition active:scale-95 border border-transparent hover:border-zinc-700 ${
-              isRefreshing ? 'animate-spin text-purple-400' : ''
-            }`}
-            title="Force Refresh (Segarkan Sesi Website)"
-          >
-            <RotateCw className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Standalone Window Button */}
-          <button
-            onClick={handleOpenStandaloneWindow}
-            className="flex items-center gap-1 px-2.5 py-1 bg-purple-600/20 hover:bg-purple-600 text-purple-300 hover:text-white rounded-lg border border-purple-500/30 transition active:scale-95 font-medium text-[11px]"
-            title="Buka di jendela aplikasi mandiri untuk akses 100% login Google / OpenAI langsung"
-          >
-            <Maximize2 className="w-3 h-3" />
-            <span className="hidden sm:inline">Jendela Mandiri</span>
-          </button>
-
-          {/* Open in New Tab */}
-          <button
-            onClick={handleOpenNewTab}
-            className="p-1.5 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-100 rounded-lg transition active:scale-95 border border-transparent hover:border-zinc-700"
-            title="Buka di tab browser baru"
-          >
-            <ExternalLink className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      </div>
-
-      {/* Main Workspace Frame Area */}
-      <div className="w-full flex-1 relative overflow-hidden bg-white">
-        {viewMode === 'embed' ? (
-          <>
-            {/* Minimalist Loader */}
-            {isLoading && (
-              <div className="absolute inset-0 bg-white/95 backdrop-blur-xs flex flex-col items-center justify-center gap-3 z-10 text-zinc-600 transition-opacity">
-                <RotateCw className="w-6 h-6 animate-spin text-purple-600" />
-                <div className="text-center">
-                  <span className="text-xs font-bold text-zinc-800">Menghubungkan ke {tool.name}...</span>
-                  <p className="text-[11px] text-zinc-400 mt-0.5">Memuat antarmuka resmi {hostname}</p>
-                </div>
-              </div>
-            )}
-
-            {/* Smart Access Assistance Banner (Triggered if strict anti-framing or login challenge occurs) */}
-            {isLoading && hasTimedOut && (
-              <div className="absolute inset-x-4 top-4 z-20 mx-auto max-w-lg bg-zinc-950/95 text-white p-4 rounded-2xl shadow-2xl border border-purple-500/40 backdrop-blur flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 animate-in fade-in slide-in-from-top-3">
-                <div className="flex items-start gap-3">
-                  <div className="w-8 h-8 rounded-xl bg-purple-600/20 border border-purple-500/30 flex items-center justify-center text-purple-400 flex-shrink-0 mt-0.5">
-                    <Sparkles className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <p className="text-xs font-bold text-white">Rekomendasi Akses Terbaik</p>
-                    <p className="text-[11px] text-zinc-400 mt-0.5 leading-relaxed">
-                      Situs <strong>{tool.name}</strong> membatasi iframe karena proteksi login Google/OpenAI. Gunakan <strong>Jendela Mandiri</strong> untuk akses bebas hambatan dengan sesi Anda.
-                    </p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 w-full sm:w-auto justify-end flex-shrink-0">
-                  <button
-                    onClick={handleOpenStandaloneWindow}
-                    className="px-3.5 py-1.5 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold transition flex items-center gap-1.5 shadow-md shadow-purple-600/30"
-                  >
-                    <span>Buka Jendela Mandiri</span>
-                    <Maximize2 className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* 100% Authentic Website Frame */}
-            <iframe
-              ref={iframeRef}
-              key={`${tool.id}-${refreshKey}-${cacheBuster}`}
-              src={targetSrc}
-              title={tool.name}
-              onLoad={() => {
-                setIsLoading(false);
-                setHasTimedOut(false);
+        <div className="flex flex-shrink-0 items-center gap-1">
+          {!standalonePreferred && (
+            <button
+              type="button"
+              onClick={() => {
+                clearLoadTimer();
+                timedOutRef.current = false;
+                setLoadError(false);
+                setIsLoading(true);
+                setMode('embed');
+                setIframeKey((value) => value + 1);
               }}
-              className="w-full h-full border-none bg-white block"
-              sandbox="allow-same-origin allow-scripts allow-popups allow-popups-to-escape-sandbox allow-forms allow-modals allow-downloads"
-              allow="camera; microphone; clipboard-read; clipboard-write; encrypted-media; display-capture; fullscreen; geolocation; autoplay; accelerometer; gyroscope"
-            />
-          </>
-        ) : (
-          /* Standalone Launchpad View */
-          <div className="w-full h-full bg-zinc-950 flex flex-col items-center justify-center p-6 text-center text-zinc-300">
-            <div className="max-w-md bg-zinc-900 border border-zinc-800 p-6 rounded-2xl shadow-xl flex flex-col items-center">
-              <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-purple-600 to-purple-800 flex items-center justify-center text-white shadow-lg shadow-purple-500/20 mb-4">
-                <Globe className="w-7 h-7" />
+              className={`hidden rounded-lg px-2.5 py-1.5 text-[10px] font-bold md:block ${mode === 'embed' ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:bg-zinc-100'}`}
+            >
+              Workspace Web
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={openStandalone}
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[10px] font-bold transition ${
+              mode === 'standalone' || standalonePreferred
+                ? 'bg-purple-600 text-white hover:bg-purple-500'
+                : 'border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+            }`}
+            title="Buka web resmi platform"
+          >
+            <Maximize2 className="h-3 w-3" />
+            <span className="hidden sm:inline">Web Resmi</span>
+          </button>
+          <button
+            type="button"
+            onClick={refresh}
+            className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900"
+            title="Muat ulang web platform"
+          >
+            <RotateCw className="h-3.5 w-3.5" />
+          </button>
+          <a
+            href={targetUrl.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900"
+            title="Buka platform di tab baru"
+            aria-label={`Buka ${tool.name} di tab baru`}
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </a>
+        </div>
+      </header>
+
+      <main className="relative min-h-0 flex-1 overflow-hidden bg-white">
+        {mode === 'standalone' ? (
+          <div className="flex h-full w-full items-center justify-center bg-zinc-50 p-6 text-center">
+            <div className="max-w-lg rounded-2xl border border-zinc-200 bg-white p-7 shadow-sm">
+              <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-purple-50 text-purple-600">
+                <Maximize2 className="h-6 w-6" />
               </div>
-              <h3 className="text-base font-extrabold text-white mb-1">
-                {tool.name} Sedang Aktif di Jendela Mandiri
-              </h3>
-              <p className="text-xs text-zinc-400 mb-6 leading-relaxed">
-                Mode jendela mandiri memberikan performa 100% native tanpa batasan sandbox, sinkronisasi penuh dengan akun Google/OpenAI Anda, dan akselerasi grafis WebGPU.
+              <h2 className="text-sm font-extrabold text-zinc-900">Gunakan web resmi {tool.name}</h2>
+              <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+                Browser memerlukan konteks web asli untuk login, cookie, keamanan, dan navigasi platform. Studio Pro tidak mengganti halaman platform dengan simulasi.
               </p>
-              <div className="flex flex-col sm:flex-row gap-2.5 w-full">
-                <button
-                  onClick={handleOpenStandaloneWindow}
-                  className="flex-1 py-2.5 px-4 bg-purple-600 hover:bg-purple-500 text-white rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 shadow-md shadow-purple-600/30"
-                >
-                  <Maximize2 className="w-3.5 h-3.5" />
-                  <span>Fokuskan Jendela</span>
-                </button>
-                <button
-                  onClick={() => setViewMode('embed')}
-                  className="py-2.5 px-4 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white rounded-xl text-xs font-bold transition border border-zinc-700"
-                >
-                  Kembali ke Frame
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={openStandalone}
+                className="mt-5 inline-flex items-center justify-center gap-2 rounded-xl bg-purple-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-purple-500"
+              >
+                <Maximize2 className="h-3.5 w-3.5" />
+                Buka Web Resmi
+              </button>
             </div>
           </div>
+        ) : (
+          <>
+            {isLoading && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center bg-white">
+                <div className="flex flex-col items-center gap-2 text-center">
+                  <RotateCw className="h-6 w-6 animate-spin text-purple-600" />
+                  <div className="text-xs font-bold text-zinc-800">Memuat web {tool.name}…</div>
+                  <div className="text-[11px] text-zinc-400">Menunggu halaman resmi (maks. 6 detik)</div>
+                </div>
+              </div>
+            )}
+
+            {loadError && (
+              <div className="absolute inset-0 z-20 flex items-center justify-center bg-white p-6 text-center">
+                <div className="max-w-lg">
+                  <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-amber-200 bg-amber-50 text-amber-600">
+                    <AlertTriangle className="h-6 w-6" />
+                  </div>
+                  <h2 className="text-sm font-extrabold text-zinc-900">Web resmi tidak dapat disematkan</h2>
+                  <p className="mt-2 text-xs leading-relaxed text-zinc-500">
+                    {tool.name} kemungkinan menggunakan CSP/X-Frame-Options atau mekanisme login yang membutuhkan top-level browser context. Studio Pro menghentikan iframe dan tidak mencoba bypass keamanan platform.
+                  </p>
+                  <div className="mt-5 flex flex-col justify-center gap-2 sm:flex-row">
+                    <button
+                      type="button"
+                      onClick={openStandalone}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-purple-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-purple-500"
+                    >
+                      <Maximize2 className="h-3.5 w-3.5" />
+                      Buka Web Resmi
+                    </button>
+                    <button
+                      type="button"
+                      onClick={retryEmbed}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2.5 text-xs font-bold text-zinc-700 hover:bg-zinc-50"
+                    >
+                      <RotateCw className="h-3.5 w-3.5" />
+                      Coba Lagi
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {!loadError && (
+              <iframe
+                key={iframeKey}
+                src={targetUrl.href}
+                title={`${tool.name} — web resmi`}
+                onLoad={handleIframeLoad}
+                onError={handleIframeError}
+                referrerPolicy="strict-origin-when-cross-origin"
+                allow="camera; microphone; clipboard-read; clipboard-write; encrypted-media; display-capture; fullscreen; geolocation; autoplay; accelerometer; gyroscope"
+                className="block h-full w-full border-0 bg-white"
+              />
+            )}
+          </>
         )}
-      </div>
+      </main>
     </div>
   );
 };
