@@ -10,12 +10,6 @@ import { AccountProfile, ToolConfig } from '../../types';
 
 const IFRAME_LOAD_TIMEOUT_MS = 6000;
 
-/**
- * Full web apps frequently reject iframe embedding through CSP/X-Frame-Options
- * or require browser-level authentication/cookie behavior. These hosts should
- * therefore start in the native browser window so users get the real product,
- * not a simulated Studio Pro surface.
- */
 const STANDALONE_HOST_PATTERNS = [
   /^([a-z0-9-]+\.)*chatgpt\.com$/i,
   /^([a-z0-9-]+\.)*canva\.com$/i,
@@ -45,11 +39,9 @@ function validateExternalTarget(rawUrl?: string): URL | null {
 
   try {
     const url = new URL(rawUrl.trim());
-
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
     if (url.origin === window.location.origin) return null;
     if (url.href === window.location.href) return null;
-
     return url;
   } catch {
     return null;
@@ -60,7 +52,7 @@ function shouldPreferStandalone(url: URL | null): boolean {
   return Boolean(url && STANDALONE_HOST_PATTERNS.some((pattern) => pattern.test(url.hostname)));
 }
 
-function buildPopupFeatures(): string {
+function popupFeatures(): string {
   const width = Math.min(1440, Math.max(980, Math.round(window.screen.availWidth * 0.86)));
   const height = Math.min(960, Math.max(720, Math.round(window.screen.availHeight * 0.86)));
   const left = Math.max(0, Math.round((window.screen.availWidth - width) / 2));
@@ -82,7 +74,6 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
   const [isLoading, setIsLoading] = useState(Boolean(targetUrl) && !standalonePreferred);
   const [loadError, setLoadError] = useState(false);
   const [iframeKey, setIframeKey] = useState(0);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
   const timeoutRef = useRef<number | null>(null);
   const timedOutRef = useRef(false);
 
@@ -113,14 +104,12 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
     setIframeKey((value) => value + 1);
 
     return clearLoadTimer;
-    // Changing account is intentionally part of the lifecycle reset: account
-    // sessions must never inherit stale iframe state from another account.
   }, [tool.id, tool.url, activeAccountId, refreshKey, standalonePreferred, targetUrl]);
 
   useEffect(() => clearLoadTimer, []);
 
   useEffect(() => {
-    if (!targetUrl || standalonePreferred || mode !== 'embed') return;
+    if (!targetUrl || standalonePreferred || mode !== 'embed' || loadError) return;
 
     timeoutRef.current = window.setTimeout(() => {
       timedOutRef.current = true;
@@ -129,7 +118,7 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
     }, IFRAME_LOAD_TIMEOUT_MS);
 
     return clearLoadTimer;
-  }, [iframeKey, mode, standalonePreferred, targetUrl]);
+  }, [iframeKey, mode, standalonePreferred, targetUrl, loadError]);
 
   const openStandalone = () => {
     if (!targetUrl) {
@@ -137,7 +126,7 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
       return;
     }
 
-    const popup = window.open(targetUrl.href, `StudioPro_${tool.id}`, buildPopupFeatures());
+    const popup = window.open(targetUrl.href, `StudioPro_${tool.id}`, popupFeatures());
 
     if (!popup) {
       window.open(targetUrl.href, '_blank', 'noopener,noreferrer');
@@ -152,14 +141,14 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
     onShowToast?.(`${tool.name} dibuka menggunakan web resmi platform.`, 'success');
   };
 
-  const handleEmbedLoad = () => {
+  const handleIframeLoad = () => {
     if (timedOutRef.current) return;
     clearLoadTimer();
     setIsLoading(false);
     setLoadError(false);
   };
 
-  const handleEmbedError = () => {
+  const handleIframeError = () => {
     clearLoadTimer();
     setIsLoading(false);
     setLoadError(true);
@@ -170,6 +159,7 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
     timedOutRef.current = false;
     setLoadError(false);
     setIsLoading(true);
+    setMode('embed');
     setIframeKey((value) => value + 1);
   };
 
@@ -215,9 +205,11 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
             <button
               type="button"
               onClick={() => {
-                setMode('embed');
+                clearLoadTimer();
+                timedOutRef.current = false;
                 setLoadError(false);
                 setIsLoading(true);
+                setMode('embed');
                 setIframeKey((value) => value + 1);
               }}
               className={`hidden rounded-lg px-2.5 py-1.5 text-[10px] font-bold md:block ${mode === 'embed' ? 'bg-zinc-900 text-white' : 'text-zinc-500 hover:bg-zinc-100'}`}
@@ -324,17 +316,18 @@ export const AppWorkspaceView: React.FC<AppWorkspaceViewProps> = ({
               </div>
             )}
 
-            <iframe
-              ref={iframeRef}
-              key={iframeKey}
-              src={targetUrl.href}
-              title={`${tool.name} — web resmi`}
-              onLoad={handleEmbedLoad}
-              onError={handleEmbedError}
-              referrerPolicy="strict-origin-when-cross-origin"
-              allow="camera; microphone; clipboard-read; clipboard-write; encrypted-media; display-capture; fullscreen; geolocation; autoplay; accelerometer; gyroscope"
-              className="block h-full w-full border-0 bg-white"
-            />
+            {!loadError && (
+              <iframe
+                key={iframeKey}
+                src={targetUrl.href}
+                title={`${tool.name} — web resmi`}
+                onLoad={handleIframeLoad}
+                onError={handleIframeError}
+                referrerPolicy="strict-origin-when-cross-origin"
+                allow="camera; microphone; clipboard-read; clipboard-write; encrypted-media; display-capture; fullscreen; geolocation; autoplay; accelerometer; gyroscope"
+                className="block h-full w-full border-0 bg-white"
+              />
+            )}
           </>
         )}
       </main>
